@@ -9,67 +9,73 @@ try {
   const disk = new VirtualDisk(BLOCK_SIZE, BLOCK_COUNT);
   const fs = new FileSystem(disk);
 
-  console.log("\n>>> 1. FORMAT & ROOT CHECK");
+  console.log(">>> Creating files and folders");
   fs.mkfs(INODE_COUNT);
-  fs.ls();
 
-  console.log("\n>>> 2. CREATING DIRECTORY TREE");
+  fs.mkdir("documents");
+  fs.create("/documents/secret.txt");
 
-  fs.mkdir("usr");
-  fs.mkdir("usr/bin");
-  fs.mkdir("home");
-  fs.mkdir("home/user");
-
-  fs.cd("usr");
-  fs.ls();
-
-  console.log("\n>>> 3. NAVIGATION TEST");
-
-  fs.cd("/");
-  fs.cd("home/user");
-  fs.cd("../..");
-  fs.cd("usr/./bin");
-
-  console.log("\n>>> 4. FILE OPERATIONS WITH PATHS");
-
-  fs.create("/home/user/notes.txt");
-
-  let fd = fs.open("/home/user/notes.txt");
-  fs.write(fd, "Nested Data Works!");
+  let fd = fs.open("/documents/secret.txt");
+  fs.write(fd, "TOP SECRET DATA");
   fs.close(fd);
 
-  fd = fs.open("../../home/user/notes.txt");
+  console.log("\n>>> Simple symlink test");
+  fs.symlink("/documents/secret.txt", "my_link");
+
+  fs.ls();
+  fs.stat("my_link");
+
+  fd = fs.open("my_link");
   const data = fs.read(fd, 100);
   console.log(`Output: "${data.toString()}"`);
   fs.close(fd);
 
-  console.log("\n>>> 5. HARD LINKS & PATHS");
+  if (data.toString() !== "TOP SECRET DATA") {
+    throw new Error("Symlink read failed!");
+  }
 
-  fs.link("/home/user/notes.txt", "link_to_notes");
+  console.log("\n>>> Directory symlink and navigation");
+  fs.symlink("/documents", "goto_docs");
 
+  fs.cd("goto_docs");
   fs.ls();
-  fs.stat("link_to_notes");
 
-  fs.unlink("/home/user/notes.txt");
-  fs.stat("link_to_notes");
+  fs.cd("..");
 
-  console.log("\n>>> 6. RMDIR TEST");
+  console.log("\n>>> Chained symlinks");
+  fs.symlink("my_link", "link_to_link");
 
-  fs.cd("/");
+  fd = fs.open("link_to_link");
+  const dataChain = fs.read(fd, 100);
+  console.log(`Output: "${dataChain.toString()}"`);
+  fs.close(fd);
+
+  console.log("\n>>> Broken link");
+  fs.symlink("/nowhere/ghost.txt", "broken_link");
+  console.log(" -> Created link to non-existent file");
 
   try {
-    fs.rmdir("usr");
+    fs.open("broken_link");
+    console.error("Error: Should have failed!");
   } catch (e) {
     console.log(`Expected error: ${e.message}`);
   }
 
-  fs.unlink("/usr/bin/link_to_notes");
+  console.log("\n>>> Infinite Recursion");
+  fs.mkdir("loops");
+  fs.cd("loops");
 
-  fs.rmdir("/usr/bin");
-  console.log("Removed /usr/bin");
+  fs.symlink("link_B", "link_A");
+  fs.symlink("link_A", "link_B");
 
-  fs.cd("usr");
-  fs.ls();
+  console.log(" -> Created infinite loop: link_A <-> link_B");
+
+  try {
+    fs.open("link_A");
+    console.error("Error: Loop not detected");
+  } catch (e) {
+    console.log(`Expected error: ${e.message}`);
+  }
 } catch (error) {
   console.error("System error");
 }

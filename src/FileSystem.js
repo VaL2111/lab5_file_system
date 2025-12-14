@@ -23,6 +23,8 @@ export class FileSystem {
     this.openFiles = [];
 
     this.cwd = this.ROOT_INODE_INDEX;
+
+    this.MAX_SYMLINK_DEPTH = 8;
   }
 
   mkfs(numInodes) {
@@ -123,12 +125,10 @@ export class FileSystem {
     console.log(`cd ${path}`);
 
     const { parentInodeId, name } = this._resolvePathToParent(path);
-
     let targetInodeId;
+
     if (name === ".") {
       targetInodeId = parentInodeId;
-    } else if (name === "..") {
-      targetInodeId = this._findInodeIdByNameInDir(parentInodeId, name);
     } else {
       targetInodeId = this._findInodeIdByNameInDir(parentInodeId, name);
     }
@@ -138,10 +138,24 @@ export class FileSystem {
     }
 
     const inode = this.inodes[targetInodeId];
+
+    if (inode.type === this.FILE_TYPE.SYMLINK) {
+      const linkTarget = this._readSymlink(targetInodeId);
+
+      if (linkTarget.startsWith("/")) {
+        return this.cd(linkTarget);
+      } else {
+        const pathParts = path.split("/");
+        pathParts.pop();
+        const dirPath = pathParts.join("/");
+
+        const newPath = (dirPath ? dirPath + "/" : "") + linkTarget;
+        return this.cd(newPath);
+      }
+    }
     if (inode.type !== this.FILE_TYPE.DIRECTORY) {
       throw new Error(`'${path}' is not a directory`);
     }
-
     this.cwd = targetInodeId;
   }
 
@@ -231,9 +245,13 @@ export class FileSystem {
     return inode;
   }
 
-  open(path) {
+  open(path, depth = 0) {
     if (!this.isMounted) {
       throw new Error("FS not mounted");
+    }
+
+    if (depth > this.MAX_SYMLINK_DEPTH) {
+      throw new Error("Too many levels of symbolic links");
     }
 
     const { parentInodeId, name } = this._resolvePathToParent(path);
@@ -244,19 +262,34 @@ export class FileSystem {
     }
 
     const inode = this.inodes[inodeId];
-    if (inode.type !== this.FILE_TYPE.REGULAR) {
-      throw new Error(`Cannot open directory '${path}' as a file`);
+
+    if (inode.type === this.FILE_TYPE.REGULAR) {
+      let fd = this.openFiles.indexOf(null);
+      if (fd === -1) {
+        fd = this.openFiles.length;
+        this.openFiles.push(null);
+      }
+      this.openFiles[fd] = { inodeIndex: inodeId, cursor: 0 };
+      console.log(`Open '${path}' -> fd=${fd}`);
+      return fd;
     }
 
-    let fd = this.openFiles.indexOf(null);
-    if (fd === -1) {
-      fd = this.openFiles.length;
-      this.openFiles.push(null);
-    }
+    if (inode.type === this.FILE_TYPE.SYMLINK) {
+      const linkTarget = this._readSymlink(inodeId);
 
-    this.openFiles[fd] = { inodeIndex: inodeId, cursor: 0 };
-    console.log(`Open '${path}' -> fd=${fd}`);
-    return fd;
+      if (linkTarget.startsWith("/")) {
+        return this.open(linkTarget, depth + 1);
+      }
+
+      const pathParts = path.split("/");
+      pathParts.pop();
+      const dirPath = pathParts.join("/");
+
+      const newPath = (dirPath ? dirPath + "/" : "") + linkTarget;
+
+      return this.open(newPath, depth + 1);
+    }
+    throw new Error(`Cannot open directory '${path}' as a file`);
   }
 
   close(fd) {
@@ -490,6 +523,45 @@ export class FileSystem {
     }
   }
 
+  symlink(targetStr, linkPath) {
+    if (!this.isMounted) {
+      throw new Error("FS not mounted");
+    }
+
+    console.log(`symlink ${targetStr} -> ${linkPath}`);
+
+    if (targetStr.length > this.disk.blockSize) {
+      throw new Error("Symlink target path too long");
+    }
+
+    const { parentInodeId, name } = this._resolvePathToParent(linkPath);
+    if (this._findInodeIdByNameInDir(parentInodeId, name) !== null) {
+      throw new Error(`Entry '${name}' already exists`);
+    }
+
+    const freeInodeIndex = this.inodes.findIndex(
+      (inode, idx) => idx > 0 && inode.type === this.FILE_TYPE.FREE,
+    );
+    if (freeInodeIndex === -1) {
+      throw new Error("No free inodes");
+    }
+
+    const linkInode = this.inodes[freeInodeIndex];
+    linkInode.type = this.FILE_TYPE.SYMLINK;
+    linkInode.nlink = 1;
+    linkInode.size = targetStr.length;
+    linkInode.blockMap = [];
+
+    const blockIndex = this._allocateBlock();
+    linkInode.blockMap.push(blockIndex);
+
+    const buffer = Buffer.alloc(this.disk.blockSize);
+    buffer.write(targetStr, 0, "utf8");
+    this.disk.writeBlock(blockIndex, buffer);
+
+    this._addDirectoryEntry(parentInodeId, name, freeInodeIndex);
+  }
+
   _addDirectoryEntry(dirInodeIndex, name, childInodeIndex) {
     const dirInode = this.inodes[dirInodeIndex];
 
@@ -614,25 +686,44 @@ export class FileSystem {
       currentInodeId = this.ROOT_INODE_INDEX;
     }
 
-    const parts = path.split("/").filter((p) => p.length > 0);
+    let parts = path.split("/").filter((p) => p.length > 0);
+    let symlinkDepth = 0;
+
     if (parts.length === 0) {
       return { parentInodeId: currentInodeId, name: "." };
     }
 
-    const fileName = parts.pop();
+    let fileName = parts.pop();
 
-    for (const part of parts) {
+    while (parts.length > 0) {
+      const part = parts.shift();
       const nextInodeId = this._findInodeIdByNameInDir(currentInodeId, part);
 
       if (nextInodeId === null) {
-        throw new Error(`Directory '${part}' not found in path '${path}'`);
+        throw new Error(`Directory '${part}' not found`);
       }
 
       const inode = this.inodes[nextInodeId];
+
+      if (inode.type === this.FILE_TYPE.SYMLINK) {
+        if (symlinkDepth >= this.MAX_SYMLINK_DEPTH) {
+          throw new Error("Too many levels of symbolic links"); //
+        }
+        symlinkDepth++;
+
+        const linkContent = this._readSymlink(nextInodeId);
+        const linkParts = linkContent.split("/").filter((p) => p.length > 0);
+
+        if (linkContent.startsWith("/")) {
+          currentInodeId = this.ROOT_INODE_INDEX;
+        }
+
+        parts = linkParts.concat(parts);
+        continue;
+      }
       if (inode.type !== this.FILE_TYPE.DIRECTORY) {
         throw new Error(`'${part}' is not a directory`);
       }
-
       currentInodeId = nextInodeId;
     }
     return { parentInodeId: currentInodeId, name: fileName };
@@ -668,5 +759,15 @@ export class FileSystem {
     this.disk.writeBlock(freeIndex, zeros);
 
     return freeIndex;
+  }
+
+  _readSymlink(inodeId) {
+    const inode = this.inodes[inodeId];
+    if (inode.type !== this.FILE_TYPE.SYMLINK) {
+      throw new Error(`Inode ${inodeId} is not a symlink`);
+    }
+    const blockIdx = inode.blockMap[0];
+    const buffer = this.disk.readBlock(blockIdx);
+    return buffer.toString("utf8").replace(/\0/g, "");
   }
 }
