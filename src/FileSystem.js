@@ -10,28 +10,76 @@ export class FileSystem {
 
     this.ROOT_INODE_INDEX = 0;
 
+    this.FILE_TYPE = {
+      FREE: 0,
+      REGULAR: 1,
+      DIRECTORY: 2,
+      SYMLINK: 3,
+    };
+
     this.DIR_ENTRY_SIZE = 32;
     this.FILENAME_MAX = 28;
 
     this.openFiles = [];
+
+    this.cwd = this.ROOT_INODE_INDEX;
   }
 
   mkfs(numInodes) {
     this.bitmap = new Array(this.disk.blockCount).fill(false);
-
     this.inodes = [];
+
     for (let i = 0; i < numInodes; i++) {
       this.inodes.push(new Inode());
     }
 
     const root = this.inodes[this.ROOT_INODE_INDEX];
-    root.type = 2;
+    root.type = this.FILE_TYPE.DIRECTORY;
     root.nlink = 1;
     root.size = 0;
 
     this.isMounted = true;
+    this.cwd = this.ROOT_INODE_INDEX;
+
+    this._addDirectoryEntry(this.ROOT_INODE_INDEX, ".", this.ROOT_INODE_INDEX);
+    this._addDirectoryEntry(this.ROOT_INODE_INDEX, "..", this.ROOT_INODE_INDEX);
+    root.nlink += 2;
 
     console.log("File System initialized");
+  }
+
+  mkdir(name) {
+    if (!this.isMounted) {
+      throw new Error("FS not mounted");
+    }
+
+    console.log(`mkdir ${name}`);
+
+    const freeInodeIndex = this.inodes.findIndex(
+      (inode, idx) => idx > 0 && inode.type === this.FILE_TYPE.FREE,
+    );
+    if (freeInodeIndex === -1) {
+      throw new Error("No free inodes");
+    }
+
+    if (this._findInodeIdByNameInDir(this.cwd, name) !== null) {
+      throw new Error(`Entry '${name}' already exists`);
+    }
+
+    const newDirInode = this.inodes[freeInodeIndex];
+    newDirInode.type = this.FILE_TYPE.DIRECTORY;
+    newDirInode.nlink = 2;
+    newDirInode.size = 0;
+    newDirInode.blockMap = [];
+
+    this._addDirectoryEntry(this.cwd, name, freeInodeIndex);
+
+    this.inodes[this.cwd].nlink++;
+
+    this._addDirectoryEntry(freeInodeIndex, ".", freeInodeIndex);
+    this._addDirectoryEntry(freeInodeIndex, "..", this.cwd);
+
+    console.log(`Created directory '${name}'`);
   }
 
   create(fileName) {
@@ -65,8 +113,9 @@ export class FileSystem {
       throw new Error("FS not mounted");
     }
 
-    const entries = this._getDirectoryEntries(this.ROOT_INODE_INDEX);
+    console.log(`ls (cwd=${this.cwd})`);
 
+    const entries = this._getDirectoryEntries(this.cwd);
     if (entries.length === 0) {
       console.log("empty");
       return;
@@ -74,9 +123,13 @@ export class FileSystem {
 
     entries.forEach((entry) => {
       const inode = this.inodes[entry.inodeId];
-      const typeStr = inode.type === 2 ? "DIR" : "REG";
+      let typeStr;
+      if (inode.type === 1) typeStr = "REG";
+      if (inode.type === 2) typeStr = "DIR";
+      if (inode.type === 3) typeStr = "SYM";
+
       console.log(
-        `${entry.name.padEnd(20)} [inode: ${entry.inodeId}, type: ${typeStr}]`,
+        `${entry.name.padEnd(10)} [inode: ${entry.inodeId}, type: ${typeStr}, nlink: ${inode.nlink}]`,
       );
     });
   }
@@ -84,7 +137,7 @@ export class FileSystem {
   stat(name) {
     if (!this.isMounted) throw new Error("FS not mounted");
 
-    const inodeId = this._findInodeIdByName(name);
+    const inodeId = this._findInodeIdByNameInDir(this.cwd, name);
     if (inodeId === null) {
       throw new Error(`File '${name}' not found`);
     }
@@ -101,7 +154,7 @@ export class FileSystem {
   open(name) {
     if (!this.isMounted) throw new Error("FS not mounted");
 
-    const inodeId = this._findInodeIdByName(name);
+    const inodeId = this._findInodeIdByNameInDir(this.cwd, name);
     if (inodeId === null) {
       throw new Error(`File '${name}' not found`);
     }
@@ -261,12 +314,12 @@ export class FileSystem {
 
     console.log(`Link ${srcName} -> ${destName}`);
 
-    const inodeId = this._findInodeIdByName(srcName);
+    const inodeId = this._findInodeIdByNameInDir(this.cwd, srcName);
     if (inodeId === null) {
       throw new Error(`Source file '${srcName}' not found`);
     }
 
-    if (this._findInodeIdByName(destName) !== null) {
+    if (this._findInodeIdByNameInDir(this.cwd, destName) !== null) {
       throw new Error(`Destination '${destName}' already exists`);
     }
 
@@ -284,7 +337,7 @@ export class FileSystem {
 
     console.log(`Unlink ${name}`);
 
-    const inodeId = this._findInodeIdByName(name);
+    const inodeId = this._findInodeIdByNameInDir(this.cwd, name);
     if (inodeId === null) {
       throw new Error(`File '${name}' not found`);
     }
@@ -294,9 +347,7 @@ export class FileSystem {
     this._removeDirectoryEntry(this.ROOT_INODE_INDEX, name);
 
     inode.nlink--;
-    console.log(
-      `Link removed. Inode ${inodeId} nlink is now ${inode.nlink}`,
-    );
+    console.log(`Link removed. Inode ${inodeId} nlink is now ${inode.nlink}`);
 
     if (inode.nlink <= 0) {
       if (this._isFileOpen(inodeId)) {
@@ -312,7 +363,7 @@ export class FileSystem {
 
     console.log(`Truncate ${name} to ${newSize}`);
 
-    const inodeId = this._findInodeIdByName(name);
+    const inodeId = this._findInodeIdByNameInDir(this.cwd, name);
     if (inodeId === null) throw new Error(`File '${name}' not found`);
 
     const inode = this.inodes[inodeId];
@@ -346,15 +397,14 @@ export class FileSystem {
         offset < this.disk.blockSize;
         offset += this.DIR_ENTRY_SIZE
       ) {
-        const existingId = buffer.readUInt32LE(offset + this.FILENAME_MAX);
-
-        if (existingId === 0) {
+        if (buffer[offset] === 0) {
           this._writeEntryToBuffer(buffer, offset, name, childInodeIndex);
-          this.disk.writeBlock(blockIdx, buffer); // Зберігаємо на диск
+          this.disk.writeBlock(blockIdx, buffer);
           return;
         }
       }
     }
+
     const newBlockIndex = this._allocateBlock();
     dirInode.blockMap.push(newBlockIndex);
     dirInode.size += this.disk.blockSize;
@@ -370,8 +420,12 @@ export class FileSystem {
     buffer.writeUInt32LE(id, offset + this.FILENAME_MAX);
   }
 
-  _getDirectoryEntries(dirInodeIndex) {
-    const dirInode = this.inodes[dirInodeIndex];
+  _getDirectoryEntries(parentInodeIndex) {
+    const dirInode = this.inodes[parentInodeIndex];
+    if (dirInode.type !== this.FILE_TYPE.DIRECTORY) {
+      throw new Error("Inode is not a directory");
+    }
+
     const entries = [];
 
     for (const blockIdx of dirInode.blockMap) {
@@ -382,12 +436,12 @@ export class FileSystem {
         offset < this.disk.blockSize;
         offset += this.DIR_ENTRY_SIZE
       ) {
-        const inodeId = buffer.readUInt32LE(offset + this.FILENAME_MAX);
-
-        if (inodeId > 0) {
+        if (buffer[offset] !== 0) {
+          const inodeId = buffer.readUInt32LE(offset + this.FILENAME_MAX);
           const name = buffer
             .toString("utf8", offset, offset + this.FILENAME_MAX)
             .replace(/\0/g, "");
+
           entries.push({ name, inodeId });
         }
       }
@@ -395,25 +449,26 @@ export class FileSystem {
     return entries;
   }
 
-  _findInodeIdByName(targetName) {
-    const rootDir = this.inodes[this.ROOT_INODE_INDEX];
+  _findInodeIdByNameInDir(parentInodeIndex, targetName) {
+    const dirInode = this.inodes[parentInodeIndex];
+    if (dirInode.type !== this.FILE_TYPE.DIRECTORY) {
+      return null;
+    }
 
-    for (const blockIdx of rootDir.blockMap) {
+    for (const blockIdx of dirInode.blockMap) {
       const buffer = this.disk.readBlock(blockIdx);
-
       for (
         let offset = 0;
         offset < this.disk.blockSize;
         offset += this.DIR_ENTRY_SIZE
       ) {
-        const inodeId = buffer.readUInt32LE(offset + this.FILENAME_MAX);
-
-        if (inodeId > 0) {
+        if (buffer[offset] !== 0) {
           const name = buffer
             .toString("utf8", offset, offset + this.FILENAME_MAX)
             .replace(/\0/g, "");
+
           if (name === targetName) {
-            return inodeId;
+            return buffer.readUInt32LE(offset + this.FILENAME_MAX);
           }
         }
       }
