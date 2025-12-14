@@ -48,12 +48,13 @@ export class FileSystem {
     console.log("File System initialized");
   }
 
-  mkdir(name) {
+  mkdir(path) {
     if (!this.isMounted) {
       throw new Error("FS not mounted");
     }
+    console.log(`mkdir ${path}`);
 
-    console.log(`mkdir ${name}`);
+    const { parentInodeId, name } = this._resolvePathToParent(path);
 
     const freeInodeIndex = this.inodes.findIndex(
       (inode, idx) => idx > 0 && inode.type === this.FILE_TYPE.FREE,
@@ -62,7 +63,7 @@ export class FileSystem {
       throw new Error("No free inodes");
     }
 
-    if (this._findInodeIdByNameInDir(this.cwd, name) !== null) {
+    if (this._findInodeIdByNameInDir(parentInodeId, name) !== null) {
       throw new Error(`Entry '${name}' already exists`);
     }
 
@@ -72,21 +73,86 @@ export class FileSystem {
     newDirInode.size = 0;
     newDirInode.blockMap = [];
 
-    this._addDirectoryEntry(this.cwd, name, freeInodeIndex);
-
-    this.inodes[this.cwd].nlink++;
+    this._addDirectoryEntry(parentInodeId, name, freeInodeIndex);
+    this.inodes[parentInodeId].nlink++;
 
     this._addDirectoryEntry(freeInodeIndex, ".", freeInodeIndex);
-    this._addDirectoryEntry(freeInodeIndex, "..", this.cwd);
+    this._addDirectoryEntry(freeInodeIndex, "..", parentInodeId);
 
     console.log(`Created directory '${name}'`);
   }
 
-  create(fileName) {
+  rmdir(path) {
     if (!this.isMounted) {
       throw new Error("FS not mounted");
     }
-    if (fileName.length > this.FILENAME_MAX) {
+    console.log(`rmdir ${path}`);
+
+    const { parentInodeId, name } = this._resolvePathToParent(path);
+
+    if (name === "." || name === "..") {
+      throw new Error("Cannot remove '.' or '..'");
+    }
+
+    const targetInodeId = this._findInodeIdByNameInDir(parentInodeId, name);
+    if (targetInodeId === null) {
+      throw new Error(`Directory '${path}' not found`);
+    }
+
+    const targetInode = this.inodes[targetInodeId];
+    if (targetInode.type !== this.FILE_TYPE.DIRECTORY) {
+      throw new Error(`'${path}' is not a directory`);
+    }
+
+    const entries = this._getDirectoryEntries(targetInodeId);
+    if (entries.length > 2) {
+      throw new Error(`Directory not empty`);
+    }
+
+    this._removeDirectoryEntry(parentInodeId, name);
+    this.inodes[parentInodeId].nlink--;
+    this._deleteFileData(targetInodeId);
+
+    console.log(`Directory '${name}' removed`);
+  }
+
+  cd(path) {
+    if (!this.isMounted) {
+      throw new Error("FS not mounted");
+    }
+    console.log(`cd ${path}`);
+
+    const { parentInodeId, name } = this._resolvePathToParent(path);
+
+    let targetInodeId;
+    if (name === ".") {
+      targetInodeId = parentInodeId;
+    } else if (name === "..") {
+      targetInodeId = this._findInodeIdByNameInDir(parentInodeId, name);
+    } else {
+      targetInodeId = this._findInodeIdByNameInDir(parentInodeId, name);
+    }
+
+    if (targetInodeId === null) {
+      throw new Error(`Directory '${path}' not found`);
+    }
+
+    const inode = this.inodes[targetInodeId];
+    if (inode.type !== this.FILE_TYPE.DIRECTORY) {
+      throw new Error(`'${path}' is not a directory`);
+    }
+
+    this.cwd = targetInodeId;
+  }
+
+  create(path) {
+    if (!this.isMounted) {
+      throw new Error("FS not mounted");
+    }
+
+    const { parentInodeId, name } = this._resolvePathToParent(path);
+
+    if (name.length > this.FILENAME_MAX) {
       throw new Error("Filename too long");
     }
 
@@ -97,15 +163,19 @@ export class FileSystem {
       throw new Error("No free inodes");
     }
 
+    if (this._findInodeIdByNameInDir(parentInodeId, name) !== null) {
+      throw new Error(`File '${name}' already exists`);
+    }
+
     const newInode = this.inodes[freeInodeIndex];
-    newInode.type = 1;
+    newInode.type = this.FILE_TYPE.REGULAR;
     newInode.nlink = 1;
     newInode.size = 0;
     newInode.bitmap = [];
 
-    this._addDirectoryEntry(this.ROOT_INODE_INDEX, fileName, freeInodeIndex);
+    this._addDirectoryEntry(parentInodeId, name, freeInodeIndex);
 
-    console.log(`Created file '${fileName}' with inode ${freeInodeIndex}`);
+    console.log(`Created file '${name}' at inode ${freeInodeIndex}`);
   }
 
   ls() {
@@ -134,49 +204,58 @@ export class FileSystem {
     });
   }
 
-  stat(name) {
-    if (!this.isMounted) throw new Error("FS not mounted");
+  stat(path) {
+    if (!this.isMounted) {
+      throw new Error("FS not mounted");
+    }
 
-    const inodeId = this._findInodeIdByNameInDir(this.cwd, name);
+    if (path === "/") {
+      const root = this.inodes[this.ROOT_INODE_INDEX];
+      console.log(`[STAT] '/': id=0, type=dir, nlink=${root.nlink}`);
+      return root;
+    }
+
+    const { parentInodeId, name } = this._resolvePathToParent(path);
+    const inodeId = this._findInodeIdByNameInDir(parentInodeId, name);
+
     if (inodeId === null) {
-      throw new Error(`File '${name}' not found`);
+      throw new Error(`File '${path}' not found`);
     }
 
     const inode = this.inodes[inodeId];
-    const typeStr = inode.type === 2 ? "dir" : "reg";
+    const typeStr = inode.type === 2 ? "dir" : inode.type === 3 ? "sym" : "reg";
 
     console.log(
-      `[STAT] '${name}': id=${inodeId}, type=${typeStr}, nlink=${inode.nlink}, size=${inode.size}, blocks=${inode.blockMap.length}`,
+      `[STAT] '${path}': id=${inodeId}, type=${typeStr}, nlink=${inode.nlink}, size=${inode.size}`,
     );
     return inode;
   }
 
-  open(name) {
-    if (!this.isMounted) throw new Error("FS not mounted");
+  open(path) {
+    if (!this.isMounted) {
+      throw new Error("FS not mounted");
+    }
 
-    const inodeId = this._findInodeIdByNameInDir(this.cwd, name);
+    const { parentInodeId, name } = this._resolvePathToParent(path);
+    const inodeId = this._findInodeIdByNameInDir(parentInodeId, name);
+
     if (inodeId === null) {
-      throw new Error(`File '${name}' not found`);
+      throw new Error(`File '${path}' not found`);
     }
 
     const inode = this.inodes[inodeId];
-    if (inode.type !== 1) {
-      throw new Error(`Cannot open directory '${name}' as a file`);
+    if (inode.type !== this.FILE_TYPE.REGULAR) {
+      throw new Error(`Cannot open directory '${path}' as a file`);
     }
 
     let fd = this.openFiles.indexOf(null);
-
     if (fd === -1) {
       fd = this.openFiles.length;
       this.openFiles.push(null);
     }
 
-    this.openFiles[fd] = {
-      inodeIndex: inodeId,
-      cursor: 0,
-    };
-
-    console.log(`Open '${name}' -> fd=${fd}`);
+    this.openFiles[fd] = { inodeIndex: inodeId, cursor: 0 };
+    console.log(`Open '${path}' -> fd=${fd}`);
     return fd;
   }
 
@@ -306,48 +385,72 @@ export class FileSystem {
     return resultBuffer;
   }
 
-  link(srcName, destName) {
-    if (!this.isMounted) throw new Error("FS not mounted");
-    if (destName.length > this.FILENAME_MAX) {
+  link(srcPath, destPath) {
+    if (!this.isMounted) {
+      throw new Error("FS not mounted");
+    }
+
+    console.log(`link ${srcPath} -> ${destPath}`);
+
+    const src = this._resolvePathToParent(srcPath);
+    const srcInodeId = this._findInodeIdByNameInDir(
+      src.parentInodeId,
+      src.name,
+    );
+
+    if (srcInodeId === null) {
+      throw new Error(`Source file '${srcPath}' not found`);
+    }
+
+    const srcInode = this.inodes[srcInodeId];
+    if (srcInode.type === this.FILE_TYPE.DIRECTORY) {
+      throw new Error(`Cannot create hard link to directory '${srcPath}'`);
+    }
+
+    const dest = this._resolvePathToParent(destPath);
+
+    if (dest.name.length > this.FILENAME_MAX) {
       throw new Error("Filename too long");
     }
 
-    console.log(`Link ${srcName} -> ${destName}`);
-
-    const inodeId = this._findInodeIdByNameInDir(this.cwd, srcName);
-    if (inodeId === null) {
-      throw new Error(`Source file '${srcName}' not found`);
+    if (this._findInodeIdByNameInDir(dest.parentInodeId, dest.name) !== null) {
+      throw new Error(`Destination '${destPath}' already exists`);
     }
 
-    if (this._findInodeIdByNameInDir(this.cwd, destName) !== null) {
-      throw new Error(`Destination '${destName}' already exists`);
-    }
+    srcInode.nlink++;
+    this._addDirectoryEntry(dest.parentInodeId, dest.name, srcInodeId);
 
-    const inode = this.inodes[inodeId];
-
-    inode.nlink++;
-
-    this._addDirectoryEntry(this.ROOT_INODE_INDEX, destName, inodeId);
-
-    console.log(`Hard link created. Inode ${inodeId} has nlink=${inode.nlink}`);
+    console.log(
+      `Hard link created. Inode ${srcInodeId} nlink=${srcInode.nlink}`,
+    );
   }
 
-  unlink(name) {
-    if (!this.isMounted) throw new Error("FS not mounted");
+  unlink(path) {
+    if (!this.isMounted) {
+      throw new Error("FS not mounted");
+    }
 
-    console.log(`Unlink ${name}`);
+    console.log(`unlink ${path}`);
 
-    const inodeId = this._findInodeIdByNameInDir(this.cwd, name);
+    const { parentInodeId, name } = this._resolvePathToParent(path);
+    if (name === "." || name === "..") {
+      throw new Error("Cannot unlink '.' or '..'");
+    }
+
+    const inodeId = this._findInodeIdByNameInDir(parentInodeId, name);
     if (inodeId === null) {
-      throw new Error(`File '${name}' not found`);
+      throw new Error(`File '${path}' not found`);
     }
 
     const inode = this.inodes[inodeId];
+    if (inode.type === this.FILE_TYPE.DIRECTORY) {
+      throw new Error(`Cannot unlink directory '${path}'. Use rmdir.`);
+    }
 
-    this._removeDirectoryEntry(this.ROOT_INODE_INDEX, name);
+    this._removeDirectoryEntry(parentInodeId, name);
 
     inode.nlink--;
-    console.log(`Link removed. Inode ${inodeId} nlink is now ${inode.nlink}`);
+    console.log(`Unlinked. Inode ${inodeId} nlink is now ${inode.nlink}`);
 
     if (inode.nlink <= 0) {
       if (this._isFileOpen(inodeId)) {
@@ -359,7 +462,9 @@ export class FileSystem {
   }
 
   truncate(name, newSize) {
-    if (!this.isMounted) throw new Error("FS not mounted");
+    if (!this.isMounted) {
+      throw new Error("FS not mounted");
+    }
 
     console.log(`Truncate ${name} to ${newSize}`);
 
@@ -501,6 +606,36 @@ export class FileSystem {
         }
       }
     }
+  }
+
+  _resolvePathToParent(path) {
+    let currentInodeId = this.cwd;
+    if (path.startsWith("/")) {
+      currentInodeId = this.ROOT_INODE_INDEX;
+    }
+
+    const parts = path.split("/").filter((p) => p.length > 0);
+    if (parts.length === 0) {
+      return { parentInodeId: currentInodeId, name: "." };
+    }
+
+    const fileName = parts.pop();
+
+    for (const part of parts) {
+      const nextInodeId = this._findInodeIdByNameInDir(currentInodeId, part);
+
+      if (nextInodeId === null) {
+        throw new Error(`Directory '${part}' not found in path '${path}'`);
+      }
+
+      const inode = this.inodes[nextInodeId];
+      if (inode.type !== this.FILE_TYPE.DIRECTORY) {
+        throw new Error(`'${part}' is not a directory`);
+      }
+
+      currentInodeId = nextInodeId;
+    }
+    return { parentInodeId: currentInodeId, name: fileName };
   }
 
   _deleteFileData(inodeId) {
