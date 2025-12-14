@@ -1,0 +1,24 @@
+{
+  "name": "lab5_file_system",
+  "version": "1.0.0",
+  "description": "",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VaL2111/lab5_file_system.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/VaL2111/lab5_file_system/issues"
+  },
+  "homepage": "https://github.com/VaL2111/lab5_file_system#readme",
+  "devDependencies": {
+    "prettier": "^3.7.4"
+  }
+}
