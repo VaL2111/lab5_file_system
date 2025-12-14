@@ -3,79 +3,91 @@ import { FileSystem } from "./src/FileSystem.js";
 
 const BLOCK_SIZE = 64;
 const BLOCK_COUNT = 100;
-const INODE_COUNT = 10;
+const INODE_COUNT = 20;
 
 try {
   const disk = new VirtualDisk(BLOCK_SIZE, BLOCK_COUNT);
   const fs = new FileSystem(disk);
 
-  console.log(">>> Creating files and folders");
+  console.log(">>> Створення дерева директорій");
+
   fs.mkfs(INODE_COUNT);
 
-  fs.mkdir("documents");
-  fs.create("/documents/secret.txt");
+  fs.mkdir("usr");
+  fs.mkdir("usr/bin");
+  fs.mkdir("home");
+  fs.mkdir("home/user");
 
-  let fd = fs.open("/documents/secret.txt");
-  fs.write(fd, "TOP SECRET DATA");
+  fs.create("/home/user/document.txt");
+  let fd = fs.open("/home/user/document.txt");
+  fs.write(fd, "Original content");
   fs.close(fd);
-
-  console.log("\n>>> Simple symlink test");
-  fs.symlink("/documents/secret.txt", "my_link");
 
   fs.ls();
-  fs.stat("my_link");
 
-  fd = fs.open("my_link");
-  const data = fs.read(fd, 100);
-  console.log(`Output: "${data.toString()}"`);
-  fs.close(fd);
+  console.log("\n>>> Навігація (cd) та відносні шляхи");
 
-  if (data.toString() !== "TOP SECRET DATA") {
-    throw new Error("Symlink read failed!");
-  }
+  fs.cd("usr/bin");
+  fs.cd("../../home");
 
-  console.log("\n>>> Directory symlink and navigation");
-  fs.symlink("/documents", "goto_docs");
-
-  fs.cd("goto_docs");
   fs.ls();
 
-  fs.cd("..");
+  console.log("\n>>> Символічні посилання на файли");
 
-  console.log("\n>>> Chained symlinks");
-  fs.symlink("my_link", "link_to_link");
+  fs.symlink("user/document.txt", "my_doc_link");
 
-  fd = fs.open("link_to_link");
-  const dataChain = fs.read(fd, 100);
-  console.log(`Output: "${dataChain.toString()}"`);
+  fs.ls();
+
+  fd = fs.open("my_doc_link");
+  const data = fs.read(fd, 50);
+  console.log(`Вивід: "${data.toString()}"`);
   fs.close(fd);
 
-  console.log("\n>>> Broken link");
-  fs.symlink("/nowhere/ghost.txt", "broken_link");
-  console.log(" -> Created link to non-existent file");
+  console.log("\n>>> Символічні посилання на директорії та рекурсивний перехід (cd)");
+
+  fs.cd("/");
+
+  fs.symlink("/usr/bin", "goto_bin");
+
+  fs.cd("goto_bin");
+
+  fs.create("check.bin");
+
+  fs.cd("/usr/bin");
+  fs.ls();
+
+  console.log("\n>>> Логіка видалення");
 
   try {
-    fs.open("broken_link");
-    console.error("Error: Should have failed!");
+    fs.unlink("/usr");
   } catch (e) {
-    console.log(`Expected error: ${e.message}`);
+    console.log(`Очікується помилка: ${e.message}`);
   }
 
-  console.log("\n>>> Infinite Recursion");
-  fs.mkdir("loops");
-  fs.cd("loops");
+  try {
+    fs.rmdir("/usr");
+  } catch (e) {
+    console.log(`Очікується помилка: ${e.message}`);
+  }
 
-  fs.symlink("link_B", "link_A");
-  fs.symlink("link_A", "link_B");
+  fs.unlink("/goto_bin");
 
-  console.log(" -> Created infinite loop: link_A <-> link_B");
+  fs.cd("/usr/bin");
+
+  console.log("\n>>> Виявлення нескінченних циклів");
+
+  fs.cd("/");
+  fs.mkdir("loop_test");
+  fs.cd("loop_test");
+
+  fs.symlink("LinkB", "LinkA");
+  fs.symlink("LinkA", "LinkB");
 
   try {
-    fs.open("link_A");
-    console.error("Error: Loop not detected");
+    fs.open("LinkA");
   } catch (e) {
-    console.log(`Expected error: ${e.message}`);
+    console.log(`Очікується помилка: ${e.message}`);
   }
 } catch (error) {
-  console.error("System error");
+  console.error("System error", error.message);
 }
